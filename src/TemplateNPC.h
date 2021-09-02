@@ -48,6 +48,14 @@ enum WeaponProficiencies
     THROW_WAR = 2567
 };
 
+static const std::unordered_set<std::string> knownSpecs = {
+    "Discipline", "Holy", "Shadow", "Protection", "Retribution",
+    "Fury", "Arms", "Arcane", "Fire", "Frost", "Affliction",
+    "Demonology", "Destruction", "Elemental", "Enhancement",
+    "Restoration", "Ballance", "Feral", "Marksmanship", "Beastmastery",
+    "Survival", "Assassination", "Combat", "Subtlety", "Blood", "Unholy",
+};
+
 static void LearnWeaponSkills(Player* player)
 {
     WeaponProficiencies wepSkills[] = {
@@ -257,14 +265,14 @@ public:
     void ExtractTalentTemplateToDB(Player* /*player*/, std::string& /*playerSpecStr*/);
     void ExtractGlyphsTemplateToDB(Player* /*player*/, std::string& /*playerSpecStr*/);
     bool CanEquipTemplate(Player* /*player*/, std::string& /*playerSpecStr*/);
-
+    void RemoveAllGear(Player* player);
     std::string GetClassString(Player* /*player*/);
-    std::string sTalentsSpec;
 
-    void LearnTemplateTalents(Player* /*player*/);
-    void LearnTemplateGlyphs(Player* /*player*/);
-    void EquipTemplateGear(Player* /*player*/);
-
+    void LearnTemplateTalents(Player* /*player*/, std::string& playerSpecStr);
+    void SyncSpentTalents(Player* /*player*/);
+    void LearnTemplateGlyphs(Player* /*player*/, std::string& playerSpecStr);
+    void EquipTemplateGear(Player* /*player*/, std::string& playerSpecStr);
+    void Copy(Player* /*target*/, Player* /*player*/);
     void LearnPlateMailSpells(Player* /*player*/);
 
     GlyphContainer m_GlyphContainer;
