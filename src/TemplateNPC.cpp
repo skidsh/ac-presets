@@ -98,7 +98,6 @@ bool sTemplateNPC::UnequipAllGear(Player* player)
             }
             // check dest->src move possibility
             ItemPosCountVec sSrc;
-            uint16          eSrc = 0;
             msg                  = player->CanStoreItem(NULL_BAG, NULL_SLOT, sSrc, pDstItem, true);
 
             if (msg != EQUIP_ERR_OK)
@@ -116,6 +115,7 @@ bool sTemplateNPC::UnequipAllGear(Player* player)
         }
 
     }
+    return true;
 }
 
 void sTemplateNPC::GiveAndEquipItem(Player* player, Item* item)
@@ -148,7 +148,6 @@ void sTemplateNPC::GiveAndEquipItem(Player* player, Item* item)
 
         // check dest->src move possibility
         ItemPosCountVec sSrc;
-        uint16 eSrc = 0;
         msg = player->CanStoreItem(NULL_BAG, NULL_SLOT, sSrc, pDstItem, true);
 
         if (msg != EQUIP_ERR_OK)
