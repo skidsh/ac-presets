@@ -37,9 +37,7 @@ void sTemplateNPC::ApplyBonus(Player* player, Item* item, EnchantmentSlot slot, 
     if (!bonusEntry || bonusEntry == 0)
         return;
 
-    player->ApplyEnchantment(item, slot, false);
     item->SetEnchantment(slot, bonusEntry, 0, 0);
-    player->ApplyEnchantment(item, slot, true);
 }
 
 void sTemplateNPC::ApplyGlyph(Player* player, uint8 slot, uint32 glyphID)
@@ -59,23 +57,7 @@ void sTemplateNPC::RemoveAllGear(Player* player)
 {
     for (uint8 i = EQUIPMENT_SLOT_START; i < EQUIPMENT_SLOT_END; ++i)
     {
-        if (Item* haveItemEquipped = player->GetItemByPos(INVENTORY_SLOT_BAG_0, i))
-        {
-            if (haveItemEquipped)
-            {
-                player->DestroyItemCount(haveItemEquipped->GetEntry(), 1, true, true);
-
-                if (haveItemEquipped->IsInWorld())
-                {
-                    haveItemEquipped->RemoveFromWorld();
-                    haveItemEquipped->DestroyForPlayer(player);
-                }
-
-                haveItemEquipped->SetUInt64Value(ITEM_FIELD_CONTAINED, 0);
-                haveItemEquipped->SetSlot(NULL_SLOT);
-                haveItemEquipped->SetState(ITEM_REMOVED, player);
-            }
-        }
+        player->DestroyItem(INVENTORY_SLOT_BAG_0, i, true);
     }
     player->GetSession()->SendAreaTriggerMessage("Your equipped gear has been destroyed.");
 }
@@ -98,42 +80,176 @@ void sTemplateNPC::RemoveAllGlyphs(Player* player)
     }
 }
 
+bool sTemplateNPC::UnequipAllGear(Player* player)
+{
+    for (uint8 i = EQUIPMENT_SLOT_START; i < EQUIPMENT_SLOT_END; ++i)
+    {
+        uint16 dest = ((INVENTORY_SLOT_BAG_0 << 8) | i);
+        Item*  pDstItem = player->GetItemByPos(dest);
+        if (pDstItem)
+        {
+            uint8   dstbag  = pDstItem->GetBagSlot();
+            uint8   dstslot = pDstItem->GetSlot();
+            InventoryResult msg = player->CanUnequipItem(dest, false);
+            if (msg != EQUIP_ERR_OK)
+            {
+                player->SendEquipError(msg, pDstItem, nullptr);
+                return false;
+            }
+            // check dest->src move possibility
+            ItemPosCountVec sSrc;
+            uint16          eSrc = 0;
+            msg                  = player->CanStoreItem(NULL_BAG, NULL_SLOT, sSrc, pDstItem, true);
+
+            if (msg != EQUIP_ERR_OK)
+            {
+                player->SendEquipError(msg, pDstItem, nullptr);
+                return false;
+            }
+            // now do moves, remove...
+            player->RemoveItem(dstbag, dstslot, true, true);
+            // add to src
+            player->StoreItem(sSrc, pDstItem, true);
+            player->AutoUnequipOffhandIfNeed();
+            // Xinef: Call this here after all needed items are equipped
+            player->RemoveItemDependentAurasAndCasts((Item*) nullptr);
+        }
+
+    }
+}
+
+void sTemplateNPC::GiveAndEquipItem(Player* player, Item* item)
+{
+    uint16          dest;
+    InventoryResult msg = player->CanEquipItem(NULL_SLOT, dest, item, !item->IsBag());
+    if (msg != EQUIP_ERR_OK)
+    {
+        player->SendEquipError(msg, item, nullptr);
+        return;
+    }
+
+    Item* pDstItem = player->GetItemByPos(dest);
+    if (!pDstItem) // empty slot, simple case
+    {
+        player->EquipItem(dest, item, true);
+        player->AutoUnequipOffhandIfNeed();
+    }
+    else // have currently equipped item, not simple case
+    {
+        uint8 dstbag  = pDstItem->GetBagSlot();
+        uint8 dstslot = pDstItem->GetSlot();
+
+        msg = player->CanUnequipItem(dest, !item->IsBag());
+        if (msg != EQUIP_ERR_OK)
+        {
+            player->SendEquipError(msg, pDstItem, nullptr);
+            return;
+        }
+
+        // check dest->src move possibility
+        ItemPosCountVec sSrc;
+        uint16 eSrc = 0;
+        msg = player->CanStoreItem(NULL_BAG, NULL_SLOT, sSrc, pDstItem, true);
+
+        if (msg != EQUIP_ERR_OK)
+        {
+            player->SendEquipError(msg, pDstItem, item);
+            return;
+        }
+
+        // now do moves, remove...
+        player->RemoveItem(dstbag, dstslot, true, true);
+
+        // add to dest
+        player->EquipItem(dest, item, true);
+
+        // add to src
+        player->StoreItem(sSrc, pDstItem, true);
+
+        player->AutoUnequipOffhandIfNeed();
+
+        // Xinef: Call this here after all needed items are equipped
+        player->RemoveItemDependentAurasAndCasts((Item*) nullptr);
+    }
+}
+
+void sTemplateNPC::CreateItemAndGive(Player* player, uint32 entry, uint32 e1, uint32 e2, uint32 e3, uint32 e4, uint32 e5, uint32 e6)
+{
+    Item* newItem = new Item;
+    if (!newItem->Create(sObjectMgr->GetGenerator<HighGuid::Item>().Generate(), entry, player))
+    {
+        delete newItem;
+        return;
+    }
+
+    ApplyBonus(player, newItem, PERM_ENCHANTMENT_SLOT, e1);
+    ApplyBonus(player, newItem, SOCK_ENCHANTMENT_SLOT, e2);
+    ApplyBonus(player, newItem, SOCK_ENCHANTMENT_SLOT_2, e3);
+    ApplyBonus(player, newItem, SOCK_ENCHANTMENT_SLOT_3, e4);
+    ApplyBonus(player, newItem, BONUS_ENCHANTMENT_SLOT, e5);
+    ApplyBonus(player, newItem, PRISMATIC_ENCHANTMENT_SLOT, e6);
+
+    sTemplateNpcMgr->GiveAndEquipItem(player, newItem);
+}
+
+void sTemplateNPC::CopyItemAndGive(Player* player, Item* original)
+{
+    sTemplateNpcMgr->CreateItemAndGive(player, original->GetEntry(),
+        original->GetEnchantmentId(PERM_ENCHANTMENT_SLOT),
+        original->GetEnchantmentId(SOCK_ENCHANTMENT_SLOT),
+        original->GetEnchantmentId(SOCK_ENCHANTMENT_SLOT_2),
+        original->GetEnchantmentId(SOCK_ENCHANTMENT_SLOT_3),
+        original->GetEnchantmentId(BONUS_ENCHANTMENT_SLOT),
+        original->GetEnchantmentId(PRISMATIC_ENCHANTMENT_SLOT));
+}
+
 void sTemplateNPC::Copy(Player* target, Player* src)
 {
 
     target->resetTalents(true);
 
-    // copy talents
-    for (const auto& [talentId, _] : src->GetTalentMap())
+    // copy talents from both specs only learn spells from the active one
+    target->ActivateSpec(src->GetActiveSpec());
+    const PlayerTalentMap& talentMap = src->GetTalentMap();
+    for (PlayerTalentMap::const_iterator itr = talentMap.begin(); itr != talentMap.end(); ++itr)
     {
-        target->learnSpell(talentId);
-        target->addTalent(talentId, src->GetActiveSpecMask(), true);
-        target->SetFreeTalentPoints(0);
+        if (itr->second->State == PLAYERSPELL_REMOVED)
+            continue;
+
+        // xinef: talent not in new spec
+        if (!(itr->second->specMask & src->GetActiveSpecMask()))
+            continue;
+
+        if (itr->second->IsInSpec(src->GetActiveSpec()))
+        {
+            target->addTalent(itr->first, src->GetActiveSpecMask(), 0);
+            if (itr->second->inSpellBook)
+            {
+                target->learnSpellHighRank(itr->first);
+            }
+        }
     }
+    target->SyncSpentTalents();
+    target->SetFreeTalentPoints(0);
+    target->SendTalentsInfoData(false);
 
     RemoveAllGlyphs(target);
 
     // copy glyphs
     for (uint8 slot = 0; slot < MAX_GLYPH_SLOT_INDEX; ++slot) ApplyGlyph(target, slot, src->GetGlyph(slot));
 
-    target->SendTalentsInfoData(false);
 
-    // copy gear
-    // empty slots will be ignored
-    for (uint8 i = EQUIPMENT_SLOT_START; i < EQUIPMENT_SLOT_END; ++i)
+    if (sTemplateNpcMgr->UnequipAllGear(target))
     {
-        Item* equippedItem = src->GetItemByPos(INVENTORY_SLOT_BAG_0, i);
-        if (!equippedItem)
-            continue;
-
-        target->EquipNewItem(i, equippedItem->GetEntry(), true);
-
-        ApplyBonus(target, target->GetItemByPos(INVENTORY_SLOT_BAG_0, i), PERM_ENCHANTMENT_SLOT, equippedItem->GetEnchantmentId(PERM_ENCHANTMENT_SLOT));
-        ApplyBonus(target, target->GetItemByPos(INVENTORY_SLOT_BAG_0, i), SOCK_ENCHANTMENT_SLOT, equippedItem->GetEnchantmentId(SOCK_ENCHANTMENT_SLOT));
-        ApplyBonus(target, target->GetItemByPos(INVENTORY_SLOT_BAG_0, i), SOCK_ENCHANTMENT_SLOT_2, equippedItem->GetEnchantmentId(SOCK_ENCHANTMENT_SLOT_2));
-        ApplyBonus(target, target->GetItemByPos(INVENTORY_SLOT_BAG_0, i), SOCK_ENCHANTMENT_SLOT_3, equippedItem->GetEnchantmentId(SOCK_ENCHANTMENT_SLOT_3));
-        ApplyBonus(target, target->GetItemByPos(INVENTORY_SLOT_BAG_0, i), BONUS_ENCHANTMENT_SLOT, equippedItem->GetEnchantmentId(BONUS_ENCHANTMENT_SLOT));
-        ApplyBonus(target, target->GetItemByPos(INVENTORY_SLOT_BAG_0, i), PRISMATIC_ENCHANTMENT_SLOT, equippedItem->GetEnchantmentId(PRISMATIC_ENCHANTMENT_SLOT));
+        // copy gear
+        // empty slots will be ignored
+        for (uint8 i = EQUIPMENT_SLOT_START; i < EQUIPMENT_SLOT_END; ++i)
+        {
+            Item* equippedItem = src->GetItemByPos(INVENTORY_SLOT_BAG_0, i);
+            if (!equippedItem)
+                continue;
+            sTemplateNpcMgr->CopyItemAndGive(target, equippedItem);
+        }
     }
 }
 
@@ -143,246 +259,28 @@ void sTemplateNPC::LearnTemplateTalents(Player* player, std::string& playerSpecS
     {
         if ((*itr)->playerClass == GetClassString(player).c_str() && (*itr)->playerSpec == playerSpecStr)
         {
-			switch (player->getClass())
-			{
-			case CLASS_WARRIOR:
-				if ((*itr)->playerSpec == "Arms")
-				{
-			        player->learnSpellHighRank(12328); // sweeping strikes
-			        player->learnSpellHighRank(12294); // mortal strike
-			        player->learnSpellHighRank(46924); // bladestorm
-			        player->learnSpellHighRank(12323); // piercing howl
-				}
-				if ((*itr)->playerSpec == "Protection")
-				{
-			        player->learnSpellHighRank(20243); // devastate
-			        player->learnSpellHighRank(46968); // shockwave
-                    player->learnSpellHighRank(12809); // concussion blow
-                    player->learnSpellHighRank(12975); // last stand
-				}
-				break;
-			case CLASS_PALADIN:
-				if ((*itr)->playerSpec == "Holy")
-				{
-			        player->learnSpellHighRank(20473); // holy shock
-			        player->learnSpellHighRank(53563); // beacon of light
-			        player->learnSpellHighRank(64205); // divine sacrifice
-			        player->learnSpellHighRank(31842); // divine illumination
-			        player->learnSpellHighRank(20216); // divine favor
-			        player->learnSpellHighRank(31821); // aura mastery
-				}
-				if ((*itr)->playerSpec == "Protection")
-				{
-			        player->learnSpellHighRank(20911); // blessing of sanctuary
-			        player->learnSpellHighRank(64205); // divine sacrifice
-			        player->learnSpellHighRank(20925); // holy shield
-			        player->learnSpellHighRank(31935); // avenger's shield
-			        player->learnSpellHighRank(53595); // hammer of the righteous
-				}
-				if ((*itr)->playerSpec == "Retribution")
-				{
-			        player->learnSpellHighRank(20066); // repentance
-			        player->learnSpellHighRank(35395); // crusader strike
-			        player->learnSpellHighRank(64205); // divine sacrifice
-			        player->learnSpellHighRank(53385); // divine storm
-				}
-				break;
-			case CLASS_HUNTER:
-				if ((*itr)->playerSpec == "Beastmastery")
-				{
-			        player->learnSpellHighRank(19577); // intimidation
-			        player->learnSpellHighRank(19574); // bestial wrath
-			        player->learnSpellHighRank(19434); // aimed shot
-                    player->learnSpellHighRank(23989); // readiness
-				}
-				if ((*itr)->playerSpec == "Marksmanship")
-				{
-			        player->learnSpellHighRank(19434); // aimed shot
-			        player->learnSpellHighRank(23989); // readiness
-			        player->learnSpellHighRank(19506); // trueshot aura
-			        player->learnSpellHighRank(34490); // silencing shot
-			        player->learnSpellHighRank(53209); // chimera shot
-			        player->learnSpellHighRank(19503); // scatter shot
-				}
-				break;
-			case CLASS_ROGUE:
-				if ((*itr)->playerSpec == "Subtlety")
-				{
-			        player->learnSpellHighRank(16511); // hemorrhage
-			        player->learnSpellHighRank(14185); // preparation
-			        player->learnSpellHighRank(14183); // premeditation
-			        player->learnSpellHighRank(36554); // shadowstep
-			        player->learnSpellHighRank(51713); // shadow dance
-				}
-                if ((*itr)->playerSpec == "Combat")
-                {
-                    player->learnSpellHighRank(13750); // adrenaline rush
-			        player->learnSpellHighRank(51690); // killing spree
-                }
-                if ((*itr)->playerSpec == "Assassination")
-                {
-			        player->learnSpellHighRank(14177); // cold blood
-			        player->learnSpellHighRank(1329);  // mutilate
-			        player->learnSpellHighRank(14185); // preparation
-                }
-				break;
-			case CLASS_PRIEST:
-				if ((*itr)->playerSpec == "Discipline")
-				{
-			        player->learnSpellHighRank(14751); // inner focus
-			        player->learnSpellHighRank(10060); // power infusion
-			        player->learnSpellHighRank(33206); // pain suppression
-			        player->learnSpellHighRank(47540); // penance
-			        player->learnSpellHighRank(19236); // desperate prayer
-				}
-				if ((*itr)->playerSpec == "Holy")
-				{
-					player->learnSpellHighRank(14751); // inner focus
-					player->learnSpellHighRank(19236); // desperate prayer
-					player->learnSpellHighRank(724); // lightwell
-					player->learnSpellHighRank(34861); // circle of healing
-					player->learnSpellHighRank(47788); // Guardian Spirit
-				}
-				if ((*itr)->playerSpec == "Shadow")
-				{
-			        player->learnSpellHighRank(15407); // mind fly
-			        player->learnSpellHighRank(15487); // silence
-			        player->learnSpellHighRank(15286); // vampiric embrace
-			        player->learnSpellHighRank(15473); // shadowform
-			        player->learnSpellHighRank(64044); // psychic horror
-			        player->learnSpellHighRank(34914); // vampiric touch
-			        player->learnSpellHighRank(47585); // dispersion
-			        player->learnSpellHighRank(14751); // inner focus
-				}
-				break;
-			case CLASS_DEATH_KNIGHT:
-				if ((*itr)->playerSpec == "Unholy")
-				{
-			        player->learnSpellHighRank(49158); // corpse explosion
-			        player->learnSpellHighRank(51052); // anti-magic zone
-			        player->learnSpellHighRank(49222); // bone shield
-			        player->learnSpellHighRank(49206); // summon gargoyle
-			        player->learnSpellHighRank(49039); // lichborne
-                    player->learnSpellHighRank(55090); // scourge strike
-				}
-				if ((*itr)->playerSpec == "Frost")
-				{
-			        player->learnSpellHighRank(49039); // lichborne
-			        player->learnSpellHighRank(49796); // deathchill
-			        player->learnSpellHighRank(49203); // hungering cold
-			        player->learnSpellHighRank(51271); // unbreakable armor
-			        player->learnSpellHighRank(49143); // frost strike
-				}
-                if ((*itr)->playerSpec == "Blood")
-				{
-			        player->learnSpellHighRank(48982); // rune tap
-			        player->learnSpellHighRank(49016); // hysteria
-			        player->learnSpellHighRank(55233); // vampiric blood
-			        player->learnSpellHighRank(55050); // hearth strike
-			        player->learnSpellHighRank(49028); // dancing rune weapon
-			        player->learnSpellHighRank(49039); // lichborne
-				}
-				break;
-			case CLASS_SHAMAN:
-				if ((*itr)->playerSpec == "Enhancement")
-				{
-			        player->learnSpellHighRank(17364); // stormstrike
-			        player->learnSpellHighRank(60103); // lava lash
-			        player->learnSpellHighRank(30823); // shamanistic rage
-			        player->learnSpellHighRank(51533); // feral spirit
-				}
-				if ((*itr)->playerSpec == "Restoration")
-				{
-			        player->learnSpellHighRank(16188); // nature's swiftness
-			        player->learnSpellHighRank(16190); // mana tide totem
-			        player->learnSpellHighRank(51886); // cleanse spirit
-			        player->learnSpellHighRank(974);   // earth shield
-			        player->learnSpellHighRank(61295); // riptide
-                    player->learnSpellHighRank(55198); // tidal force
-				}
-				if ((*itr)->playerSpec == "Elemental")
-				{
-			        player->learnSpellHighRank(16166); // elemental mastery
-			        player->learnSpellHighRank(51490); // thunderstorm
-			        player->learnSpellHighRank(30706); // totem of wrath
-				}
-				break;
-			case CLASS_MAGE:
-				if ((*itr)->playerSpec == "Fire")
-				{
-			        player->learnSpellHighRank(11366); // pyroblast
-			        player->learnSpellHighRank(11113); // blast wave
-			        player->learnSpellHighRank(11129); // combustion
-			        player->learnSpellHighRank(31661); // dragon's breath
-			        player->learnSpellHighRank(44457); // living bomb
-			        player->learnSpellHighRank(54646); // focus magic
-				}
-				if ((*itr)->playerSpec == "Frost")
-				{
-			        player->learnSpellHighRank(12472); // icy veins
-			        player->learnSpellHighRank(11958); // cold snap
-			        player->learnSpellHighRank(11426); // ice barrier
-			        player->learnSpellHighRank(31687); // summon water elemental
-			        player->learnSpellHighRank(44572); // deep freeze
-			        player->learnSpellHighRank(54646); // focus magic
-				}
-                if ((*itr)->playerSpec == "Arcane")
-				{
-                    player->learnSpellHighRank(12043); // presence of mind
-			        player->learnSpellHighRank(12042); // arcane power
-			        player->learnSpellHighRank(31589); // slow
-			        player->learnSpellHighRank(44425); // arcane barrage
-			        player->learnSpellHighRank(12472); // icy veins
-				}
-				break;
-			case CLASS_WARLOCK:
-				if ((*itr)->playerSpec == "Affliction")
-				{
-			        player->learnSpellHighRank(18223); // curse of exhaustion
-			        player->learnSpellHighRank(30108); // unstable affliction
-			        player->learnSpellHighRank(48181); // haunt
-			        player->learnSpellHighRank(18708); // fel domination
-                    player->learnSpellHighRank(19028); // soul link
-				}
-				if ((*itr)->playerSpec == "Destruction")
-				{
-			        player->learnSpellHighRank(17877); // shadowburn
-			        player->learnSpellHighRank(17962); // conflagrate
-			        player->learnSpellHighRank(30283); // shadowfury
-			        player->learnSpellHighRank(50796); // chaos bolt
-			        player->learnSpellHighRank(18708); // fel domination
-                    player->learnSpellHighRank(19028); // soul link
-				}
-				break;
-			case CLASS_DRUID:
-				if ((*itr)->playerSpec == "Restoration")
-				{
-			        player->learnSpellHighRank(17116); // nature's swiftness
-			        player->learnSpellHighRank(18562); // swiftmend
-			        player->learnSpellHighRank(48438); // wild growth
-				}
-				if ((*itr)->playerSpec == "Feral")
-				{
-			        player->learnSpellHighRank(61336); // survival instincts
-			        player->learnSpellHighRank(49377); // feral charge
-			        player->learnSpellHighRank(33876); // mangle cat
-			        player->learnSpellHighRank(33878); // mangle bear
-			        player->learnSpellHighRank(50334); // berserk
-				}
-                if ((*itr)->playerSpec == "Ballance")
-				{
-                    player->learnSpellHighRank(33831); // force of nature
-                    player->learnSpellHighRank(50516); // typhoon
-                    player->learnSpellHighRank(48505); // starfall
-                    player->learnSpellHighRank(24858); // moonkin form
-                    player->learnSpellHighRank(5570); // insect swarm
-				}
-				break;
-			}
+            SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo((*itr)->talentId);
+            if (!SpellMgr::CheckSpellValid(spellInfo, (*itr)->talentId, true))
+                continue;
+
+            TalentSpellPos const* talentPos = GetTalentSpellPos((*itr)->talentId);
+            if (!talentPos)
+                continue;
+
+            TalentEntry const* talentInfo = sTalentStore.LookupEntry(talentPos->talent_id);
+            if (!talentInfo)
+                continue;
+
             player->addTalent((*itr)->talentId, player->GetActiveSpecMask(), 0);
+
+            bool inBook = talentInfo->addToSpellBook && !spellInfo->HasAttribute(SPELL_ATTR0_PASSIVE) && !spellInfo->HasEffect(SPELL_EFFECT_LEARN_SPELL);
+            if (inBook)
+            {
+                player->learnSpellHighRank((*itr)->talentId);
+            }  
         }
     }
-    player->SyncSpentTalents(player);
+    player->SyncSpentTalents();
     player->SetFreeTalentPoints(0);
     player->SendTalentsInfoData(false);
 }
@@ -399,60 +297,45 @@ void sTemplateNPC::LearnTemplateGlyphs(Player* player, std::string& playerSpecSt
 
 void sTemplateNPC::EquipTemplateGear(Player* player, std::string& playerSpecStr)
 {
-    if (player->getRace() == RACE_HUMAN)
+    if (sTemplateNpcMgr->UnequipAllGear(player))
     {
-        // reverse sort so we equip items from trinket to helm so we avoid issue with meta gems
-        std::sort(m_HumanGearContainer.begin(), m_HumanGearContainer.end(), std::greater<HumanGearTemplate*>());
-
-        for (HumanGearContainer::const_iterator itr = m_HumanGearContainer.begin(); itr != m_HumanGearContainer.end(); ++itr)
+        if (player->getRace() == RACE_HUMAN)
         {
-            if ((*itr)->playerClass == GetClassString(player).c_str() && (*itr)->playerSpec == playerSpecStr)
+            // reverse sort so we equip items from trinket to helm so we avoid issue with meta gems
+            std::sort(m_HumanGearContainer.begin(), m_HumanGearContainer.end(), std::greater<HumanGearTemplate*>());
+
+            for (HumanGearContainer::const_iterator itr = m_HumanGearContainer.begin(); itr != m_HumanGearContainer.end(); ++itr)
             {
-                player->EquipNewItem((*itr)->pos, (*itr)->itemEntry, true); // Equip the item and apply enchants and gems
-                ApplyBonus(player, player->GetItemByPos(INVENTORY_SLOT_BAG_0, (*itr)->pos), PERM_ENCHANTMENT_SLOT, (*itr)->enchant);
-                ApplyBonus(player, player->GetItemByPos(INVENTORY_SLOT_BAG_0, (*itr)->pos), BONUS_ENCHANTMENT_SLOT, (*itr)->bonusEnchant);
-                ApplyBonus(player, player->GetItemByPos(INVENTORY_SLOT_BAG_0, (*itr)->pos), PRISMATIC_ENCHANTMENT_SLOT, (*itr)->prismaticEnchant);
-                ApplyBonus(player, player->GetItemByPos(INVENTORY_SLOT_BAG_0, (*itr)->pos), SOCK_ENCHANTMENT_SLOT_2, (*itr)->socket2);
-                ApplyBonus(player, player->GetItemByPos(INVENTORY_SLOT_BAG_0, (*itr)->pos), SOCK_ENCHANTMENT_SLOT_3, (*itr)->socket3);
-                ApplyBonus(player, player->GetItemByPos(INVENTORY_SLOT_BAG_0, (*itr)->pos), SOCK_ENCHANTMENT_SLOT, (*itr)->socket1);
+                if ((*itr)->playerClass == GetClassString(player).c_str() && (*itr)->playerSpec == playerSpecStr)
+                {
+                    sTemplateNpcMgr->CreateItemAndGive(player, (*itr)->itemEntry, (*itr)->enchant, (*itr)->socket1, (*itr)->socket2, (*itr)->socket3, (*itr)->bonusEnchant, (*itr)->prismaticEnchant);
+                }
             }
         }
-    }
-    else if (player->GetTeamId() == TEAM_ALLIANCE && player->getRace() != RACE_HUMAN)
-    {
-        // reverse sort so we equip items from trinket to helm so we avoid issue with meta gems
-        std::sort(m_AllianceGearContainer.begin(), m_AllianceGearContainer.end(), std::greater<AllianceGearTemplate*>());
-
-        for (AllianceGearContainer::const_iterator itr = m_AllianceGearContainer.begin(); itr != m_AllianceGearContainer.end(); ++itr)
+        else if (player->GetTeamId() == TEAM_ALLIANCE && player->getRace() != RACE_HUMAN)
         {
-            if ((*itr)->playerClass == GetClassString(player).c_str() && (*itr)->playerSpec == playerSpecStr)
+            // reverse sort so we equip items from trinket to helm so we avoid issue with meta gems
+            std::sort(m_AllianceGearContainer.begin(), m_AllianceGearContainer.end(), std::greater<AllianceGearTemplate*>());
+
+            for (AllianceGearContainer::const_iterator itr = m_AllianceGearContainer.begin(); itr != m_AllianceGearContainer.end(); ++itr)
             {
-                player->EquipNewItem((*itr)->pos, (*itr)->itemEntry, true); // Equip the item and apply enchants and gems
-                ApplyBonus(player, player->GetItemByPos(INVENTORY_SLOT_BAG_0, (*itr)->pos), PERM_ENCHANTMENT_SLOT, (*itr)->enchant);
-                ApplyBonus(player, player->GetItemByPos(INVENTORY_SLOT_BAG_0, (*itr)->pos), BONUS_ENCHANTMENT_SLOT, (*itr)->bonusEnchant);
-                ApplyBonus(player, player->GetItemByPos(INVENTORY_SLOT_BAG_0, (*itr)->pos), PRISMATIC_ENCHANTMENT_SLOT, (*itr)->prismaticEnchant);
-                ApplyBonus(player, player->GetItemByPos(INVENTORY_SLOT_BAG_0, (*itr)->pos), SOCK_ENCHANTMENT_SLOT_2, (*itr)->socket2);
-                ApplyBonus(player, player->GetItemByPos(INVENTORY_SLOT_BAG_0, (*itr)->pos), SOCK_ENCHANTMENT_SLOT_3, (*itr)->socket3);
-                ApplyBonus(player, player->GetItemByPos(INVENTORY_SLOT_BAG_0, (*itr)->pos), SOCK_ENCHANTMENT_SLOT, (*itr)->socket1);
+                if ((*itr)->playerClass == GetClassString(player).c_str() && (*itr)->playerSpec == playerSpecStr)
+                {
+                    sTemplateNpcMgr->CreateItemAndGive(player, (*itr)->itemEntry, (*itr)->enchant, (*itr)->socket1, (*itr)->socket2, (*itr)->socket3, (*itr)->bonusEnchant, (*itr)->prismaticEnchant);
+                }
             }
         }
-    }
-    else if (player->GetTeamId() == TEAM_HORDE)
-    {
-        // reverse sort so we equip items from trinket to helm so we avoid issue with meta gems
-        std::sort(m_HordeGearContainer.begin(), m_HordeGearContainer.end(), std::greater<HordeGearTemplate*>());
-
-        for (HordeGearContainer::const_iterator itr = m_HordeGearContainer.begin(); itr != m_HordeGearContainer.end(); ++itr)
+        else if (player->GetTeamId() == TEAM_HORDE)
         {
-            if ((*itr)->playerClass == GetClassString(player).c_str() && (*itr)->playerSpec == playerSpecStr)
+            // reverse sort so we equip items from trinket to helm so we avoid issue with meta gems
+            std::sort(m_HordeGearContainer.begin(), m_HordeGearContainer.end(), std::greater<HordeGearTemplate*>());
+
+            for (HordeGearContainer::const_iterator itr = m_HordeGearContainer.begin(); itr != m_HordeGearContainer.end(); ++itr)
             {
-                player->EquipNewItem((*itr)->pos, (*itr)->itemEntry, true); // Equip the item and apply enchants and gems
-                ApplyBonus(player, player->GetItemByPos(INVENTORY_SLOT_BAG_0, (*itr)->pos), PERM_ENCHANTMENT_SLOT, (*itr)->enchant);
-                ApplyBonus(player, player->GetItemByPos(INVENTORY_SLOT_BAG_0, (*itr)->pos), BONUS_ENCHANTMENT_SLOT, (*itr)->bonusEnchant);
-                ApplyBonus(player, player->GetItemByPos(INVENTORY_SLOT_BAG_0, (*itr)->pos), PRISMATIC_ENCHANTMENT_SLOT, (*itr)->prismaticEnchant);
-                ApplyBonus(player, player->GetItemByPos(INVENTORY_SLOT_BAG_0, (*itr)->pos), SOCK_ENCHANTMENT_SLOT_2, (*itr)->socket2);
-                ApplyBonus(player, player->GetItemByPos(INVENTORY_SLOT_BAG_0, (*itr)->pos), SOCK_ENCHANTMENT_SLOT_3, (*itr)->socket3);
-                ApplyBonus(player, player->GetItemByPos(INVENTORY_SLOT_BAG_0, (*itr)->pos), SOCK_ENCHANTMENT_SLOT, (*itr)->socket1);
+                if ((*itr)->playerClass == GetClassString(player).c_str() && (*itr)->playerSpec == playerSpecStr)
+                {
+                    sTemplateNpcMgr->CreateItemAndGive(player, (*itr)->itemEntry, (*itr)->enchant, (*itr)->socket1, (*itr)->socket2, (*itr)->socket3, (*itr)->bonusEnchant, (*itr)->prismaticEnchant);
+                }
             }
         }
     }
@@ -866,22 +749,6 @@ public:
                 return;
             }
 
-            sTemplateNpcMgr->RemoveAllGear(player);
-
-            // Don't let players to Template feature while wearing some gear
-            for (uint8 i = EQUIPMENT_SLOT_START; i < EQUIPMENT_SLOT_END; ++i)
-            {
-                if (Item* haveItemEquipped = player->GetItemByPos(INVENTORY_SLOT_BAG_0, i))
-                {
-                    if (haveItemEquipped)
-                    {
-                        player->GetSession()->SendAreaTriggerMessage("You need to remove all your equipped items in order to this feature!");
-						CloseGossipMenuFor(player);
-                        return;
-                    }
-                }
-            }
-
             if (player->resetTalents(true))
             {
                 player->SendTalentsInfoData(false);
@@ -896,7 +763,6 @@ public:
                 return;
             }
 
-            player->_RemoveAllItemMods();
             sTemplateNpcMgr->LearnTemplateTalents(player, playerSpecStr);
             sTemplateNpcMgr->LearnTemplateGlyphs(player, playerSpecStr);
             sTemplateNpcMgr->EquipTemplateGear(player, playerSpecStr);

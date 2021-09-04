@@ -258,6 +258,10 @@ public:
 
     void ApplyGlyph(Player* player, uint8 slot, uint32 glyphID);
     void RemoveAllGlyphs(Player* player);
+    bool UnequipAllGear(Player* player);
+    void GiveAndEquipItem(Player* player, Item* item);
+    void CreateItemAndGive(Player* player, uint32 entry, uint32 e1, uint32 e2, uint32 e3, uint32 e4, uint32 e5, uint32 e6);
+    void CopyItemAndGive(Player* player, Item* orginal);
     void ApplyBonus(Player* player, Item* item, EnchantmentSlot slot, uint32 bonusEntry);
 
     bool OverwriteTemplate(Player* /*player*/, std::string& /*playerSpecStr*/);
